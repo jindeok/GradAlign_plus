@@ -1,7 +1,7 @@
 import os.path as osp
 
-from utils import Reordering
 from utils import *
+from data import *
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,7 +9,8 @@ from torch_cluster import random_walk
 from sklearn.linear_model import LogisticRegression
 
 import torch_geometric.transforms as T
-from torch_geometric.nn import SAGEConv, GraphConv, GCNConv
+from torch_geometric.nn import SAGEConv, GraphConv, GCNConv, GINConv, global_mean_pool
+from torch.nn import Linear, Sequential, ReLU, BatchNorm1d as BN
 
 from torch.nn import init
 
@@ -30,61 +31,63 @@ from sklearn import metrics
 from tqdm import tqdm
 from tqdm import trange
 import time
+import IPython
 
+import math 
 '''GraphConv -> add Activation / Normalization '''
 
 class GradAlign:
-    def __init__(self, G1, G2, att_s, att_t, k_hop, alignment_dict, alignment_dict_reversed, train_ratio, idx1_dict, idx2_dict):
+    def __init__(self, G1, G2, att_s, att_t, att_aug_s, att_aug_t, k_hop, hid, alignment_dict, alignment_dict_reversed, train_ratio, idx1_dict, idx2_dict, alpha,beta):
 
         self.G1 = G1
         self.G2 = G2
-
         self.layer = k_hop
+    
         
         self.att_s = att_s
         self.att_t = att_t
+        self.att_aug_s = att_aug_s
+        self.att_aug_t = att_aug_t
         
-        self.epochs = 30        
-        self.hid_channel = 200
+        self.epochs = 30       
+        self.hid_channel = hid
+        self.mid_channel = hid
         
         self.default_weight = 1.0
-        #self.p = 1.1
         
         self.device = torch.device('cpu')    
+
         self.alignment_dict = alignment_dict
         self.alignment_dict_reversed =alignment_dict_reversed
 
         self.train_ratio = train_ratio
         self.idx1_dict = idx1_dict 
         self.idx2_dict = idx2_dict 
-        #self.attr_norm_s, self.attr_norm_t =self.normalized_attribute(G1, G2) 
 
         self.gamma = 1
         self.lp_thresh = 0.7
         
         # average degree ratio
-       # self.ratio = (self.G1.number_of_edges()/self.G1.number_of_nodes()) / \
-                     # (self.G2.number_of_edges()/self.G2.number_of_nodes())
-        self.ratio = self.G1.number_of_nodes()/self.G2.number_of_nodes()
+        #self.ratio = ratio
+        self.alpha = alpha
+        self.beta = beta
+        #self.ratio = self.G1.number_of_nodes()/self.G2.number_of_nodes()
         
         #mode config
         self.eval_mode = True
-        self.cea_mode = False
-
         
-        #self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') # disable temporarily because of error
+        #self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') #  temporarily disabled
         
-    def run_algorithm(self): #anchor is not considered yet
-        
+    def run_algorithm(self): 
+        torch.autograd.set_detect_anomaly(True) 
         iteration = 0
-
-        # mul = int(np.max([np.max(self.G1.nodes()), np.max(self.G2.nodes())]))
         
-        #Construct GNN
-
-      #  model = myGNN_hidden(len(self.att_s.T), hidden_channels=self.hid_channel, num_layers = self.layer)
-        model = myGCN(len(self.att_s.T), hidden_channels=self.hid_channel, num_layers = self.layer)
-        model = model.to(self.device)
+        #Construct learning models
+        att_model = FeatureAttention(len(self.att_s.T), len(self.att_aug_s.T), self.mid_channel)        
+        att_model  = att_model.to(self.device)
+        GNN_model = myGIN(self.mid_channel, hidden_channels=self.hid_channel, num_layers = self.layer)
+        GNN_model = GNN_model.to(self.device)
+        tot_model = AttentionCombinedGNN(att_model, GNN_model)
         
         if self.train_ratio == 0:
             seed_list1 = []
@@ -105,11 +108,12 @@ class GradAlign:
         columns = sorted(list(self.G2.nodes()))
         
         start = time.time()
+        
         # Start iteration
 
         while True:
                 
-            self.attr_norm_s, self.attr_norm_t =self.normalized_attribute(self.G1, self.G2)
+            #self.attr_norm_s, self.attr_norm_t =self.normalized_attribute(self.G1, self.G2)
             
             index = list(set(index) - set(seed_list1))
             columns = list(set(columns) - set(seed_list2))
@@ -119,29 +123,23 @@ class GradAlign:
             if len(self.alignment_dict) == len(seed_list1):
                 break
             print('\n ------ The current iteration : {} ------'.format(iteration))
-            # GNN Embedding Update
             
-            # for plain graph
-            data_s, x_s, edge_index_s, edge_weight_s = self.convert2torch_data(self.G1, self.attr_norm_s) 
-            data_t, x_t, edge_index_t, edge_weight_t = self.convert2torch_data(self.G2, self.attr_norm_t)
-                        
-            # data_s, x_s, edge_index_s, edge_weight_s = self.convert2torch_data(self.G1, self.att_s) 
-            # data_t, x_t, edge_index_t, edge_weight_t = self.convert2torch_data(self.G2, self.att_t)
-            if self.cea_mode == False:
-                if iteration == 0:
-                    embedding1, embedding2 = self.embedding(seed_list1, seed_list2, iteration, self.epochs, x_s, edge_index_s, edge_weight_s, x_t, edge_index_t, edge_weight_t, model, data_s, data_t)
-                    
-            elif self.cea_mode == True:
-                embedding1, embedding2 = self.embedding(seed_list1, seed_list2, iteration, self.epochs, x_s, edge_index_s, edge_weight_s, x_t, edge_index_t, edge_weight_t, model, data_s, data_t)
-           
-            # Update graph
+            if iteration == 0:
+                # GNN Embedding Update
+                data_s, x_s, edge_index_s, edge_weight_s = self.convert2torch_data(self.G1, self.att_s) 
+                data_t, x_t, edge_index_t, edge_weight_t = self.convert2torch_data(self.G2, self.att_t)
+
+                data_aug_s, x_aug_s, edge_index_aug_s, edge_weight_aug_s = self.convert2torch_data(self.G1, self.att_aug_s) 
+                data_aug_t, x_aug_t, edge_index_aug_t, edge_weight_aug_t = self.convert2torch_data(self.G2, self.att_aug_t)
+                
+                embedding1, embedding2 = self.embedding(seed_list1, seed_list2, iteration, self.epochs, x_s, x_aug_s, edge_index_s, x_t, x_aug_t, edge_index_t,  tot_model, data_s, data_t)
+
             print('\n start adding a seed nodes')
-            seed_list1, seed_list2, anchor, S, adj2 = self.AddSeeds(embedding1, embedding2, index, columns, seed_list1, seed_list2, iteration)
-            embedding_fin1 = embedding1[self.layer].detach().numpy()
-            embedding_fin2 = embedding2[self.layer].detach().numpy()
-            if self.cea_mode == True:                
-                print('\n link prediction...')
-                self.G1, self.G2 = self.EvolveGraph(seed_list1, seed_list2, S)
+            if iteration == 0:
+                seed_list1, seed_list2, S, adj2, S_emb = self.AddSeeds_ver2_init(embedding1, embedding2, index, columns, seed_list1, seed_list2, iteration)
+            else:
+                seed_list1, seed_list2, S, adj2 = self.AddSeeds_ver2(S_emb, embedding1, embedding2, index, columns, seed_list1, seed_list2, iteration)
+
             iteration += 1
             
             
@@ -149,21 +147,19 @@ class GradAlign:
         print("total time : {}sec".format(int(time.time() - start)))
         print('\n Start evaluation...')
         self.Evaluation(seed_list1, seed_list2)
-        S_prime = self.FinalEvaluation(S, embedding1, embedding2, seed_list1, seed_list2, self.idx1_dict, self.idx2_dict, adj2)
+        S_prime, result = self.FinalEvaluation(S, embedding1, embedding2, seed_list1, seed_list2, self.idx1_dict, self.idx2_dict, adj2)
         
-        return S, S_prime, seed_list1, seed_list2
+        return S, S_prime, seed_list1, seed_list2, result, att_model.att_score
 
     
     def convert2torch_data(self, G, att):      
         
         data = from_networkx(G)
-        #data.edge_index = data.edge_index.contiguous()
         att = torch.from_numpy(att)
         data.x = att
         x, edge_index = data.x.to(self.device), data.edge_index.to(self.device)
         data.edge_attr = data['weight']
         edge_weight = data.edge_attr
-        #to dtype float 
         x = x.float()
         edge_weight = edge_weight.float()
 
@@ -175,12 +171,15 @@ class GradAlign:
         self.degarr_s = normalized_adj(G1)
         self.degarr_t = normalized_adj(G2)
         
-        attr1_norm = self.degarr_s * self.att_s
-        attr2_norm = self.degarr_t * self.att_t
+        # attr1_norm = self.degarr_s * self.att_s
+        # attr2_norm = self.degarr_t * self.att_t
+        
+        attr1_norm = self.att_s
+        attr2_norm = self.att_t     #for ablation
         
         return attr1_norm, attr2_norm
         
-    def embedding(self, seed_list1, seed_list2, match_iter, epoch, x_s, edge_index_s, edge_weight_s, x_t, edge_index_t, edge_weight_t, model, data_s, data_t):
+    def embedding(self, seed_list1, seed_list2, match_iter, epoch, x_s, x_aug_s, edge_index_s, x_t, x_aug_t, edge_index_t, model, data_s, data_t):
 
         seed_1_idx_list = [self.idx1_dict[a] for a in seed_list1]
         seed_1_idx_list = torch.LongTensor(seed_1_idx_list)        
@@ -191,45 +190,40 @@ class GradAlign:
         
         A_s = nx.adjacency_matrix(self.G1)
         A_t = nx.adjacency_matrix(self.G2)
-        A_hat_s_list = self.new_Laplacian_graph(A_s.todense())
-        A_hat_t_list = self.new_Laplacian_graph(A_t.todense())
-
-
-
+        A_hat_s_list = self.distinctive_loss(A_s.todense())
+        A_hat_t_list = self.distinctive_loss(A_t.todense())
+        
         t = trange(epoch, desc='EMB')            
         model.train()
         for ep in t:     
             
             total_loss = 0
             
-            #for loss test
-            embedding_s = model.full_forward(x_s, edge_index_s, edge_weight_s)
-            embedding_t = model.full_forward(x_t, edge_index_t, edge_weight_t)
+            #for loss test GIN
+            embedding_s = model.full_forward(x_s, x_aug_s, edge_index_s)
+            embedding_t = model.full_forward(x_t, x_aug_t, edge_index_t)
+            # others
+            # embedding_s = model.full_forward(x_s, edge_index_s, edge_weight_s)
+            # embedding_t = model.full_forward(x_t, edge_index_t, edge_weight_t)
             
             optimizer.zero_grad()
             loss = 0
             for i, (emb_s, emb_t, A_hat_s, A_hat_t) in enumerate(zip(embedding_s, embedding_t, A_hat_s_list, A_hat_t_list)):
                 #multi-layer-loss
                 if i == 0:
-                    continue
-                
+                    continue                
                 consistency_loss_s = self.linkpred_loss(emb_s, A_hat_s)
                 consistency_loss_t = self.linkpred_loss(emb_t, A_hat_t)
                 loss += consistency_loss_s + consistency_loss_t
-
-                
-            loss.backward()
-            optimizer.step()
-                
+   
+            loss.backward(retain_graph=True)
+            optimizer.step()                
             total_loss += float(loss)
             t.set_description('EMB (total_loss=%g)' % (total_loss))
-
-
-        embedding_s = model.full_forward(x_s, edge_index_s, edge_weight_s)
-        #embedding_s = embedding_s.detach().numpy()
-        
-        embedding_t = model.full_forward(x_t, edge_index_t, edge_weight_t)
-        #embedding_t = embedding_t.detach().numpy()
+            
+        #for test GIN
+        embedding_s = model.full_forward(x_s, x_aug_s, edge_index_s)        
+        embedding_t = model.full_forward(x_t, x_aug_t, edge_index_t)
               
         return embedding_s, embedding_t
     
@@ -238,90 +232,111 @@ class GradAlign:
         for i, j in zip(self.pre_seed_list1,self.pre_seed_list2):
             self.H[self.idx1_dict[i],self.idx2_dict[j]] = gamma            
         return self.H
+            
+    def AddSeeds_ver2(self, S_emb, embedding1, embedding2,  index, columns, seed_list1, seed_list2, iteration):
+        S_fin =S_emb
+        sim_matrix = np.zeros((len(index) * len(columns), 3))
+        for i in range(len(index)):
+            for j in range(len(columns)):
+                sim_matrix[i * len(columns) + j, 0] = index[i] 
+                sim_matrix[i * len(columns) + j, 1] = columns[j]
+                sim_matrix[i * len(columns) + j, 2] = S_fin[self.idx1_dict[index[i]], self.idx2_dict[columns[j]]] 
+                
 
-    def AddSeeds(self, embedding1, embedding2, index, columns, seed_list1, seed_list2, iteration):
+        if len(seed_list1) != 0:
+            print("Tversky sim calculation..")
+            sim_matrix2 = calculate_Tversky_coefficient(self.G1, self.G2, seed_list1, seed_list2, index, columns, alpha = self.alpha, beta = self.beta)
+            sim_matrix[:, 2] *= sim_matrix2[:, 2]
+        else:
+            sim_matrix2 = 1 # no effect
+        sim_matrix = sim_matrix[np.argsort(-sim_matrix[:, 2])]
+            
+        seed1 = []
+        seed2 = []
+        len_sim_matrix = len(sim_matrix)
+        if len_sim_matrix != 0:            
+    
+            len_sim_matrix = len(sim_matrix)
+            T = align_func(version = 'const', a = int(len(self.alignment_dict)/5), b = 0, i = iteration) 
 
-        #cos = cosine_similarity(embedding1, embedding2)
+            while len(sim_matrix) > 0 and T > 0:
+                T -= 1
+                node1, node2 = int(sim_matrix[0, 0]), int(sim_matrix[0, 1])
+                seed1.append(node1)
+                seed2.append(node2)
+                sim_matrix = sim_matrix[sim_matrix[:, 0] != node1, :]
+                sim_matrix = sim_matrix[sim_matrix[:, 1] != node2, :]
+
+        seed_list1 += seed1
+        seed_list2 += seed2
+        print('Add seed nodes : {}'.format(len(seed1)))
+        print(f'{iteration} iter completed')
         
+        self.Evaluation(seed_list1, seed_list2)
+        
+        return seed_list1, seed_list2, S_fin, sim_matrix2    
+
+    
+    def AddSeeds_ver2_init(self, embedding1, embedding2, index, columns, seed_list1, seed_list2, iteration):
+        
+        S_emb1 = np.zeros((self.G1.number_of_nodes(),self.G2.number_of_nodes()))
+        S_emb2 = np.zeros((self.G1.number_of_nodes(),self.G2.number_of_nodes()))
         S_fin = np.zeros((self.G1.number_of_nodes(),self.G2.number_of_nodes()))
         
         for i, (emb1, emb2) in enumerate(zip(embedding1, embedding2)):            
             S = torch.matmul(F.normalize(emb1), F.normalize(emb2).t())
             S = S.detach().numpy()
-            S_fin += (1/(self.layer+1)) * S     
+            S_emb1 += (1/(self.layer+1)) * S     
             
+            
+        S_fin = S_emb1 
+        S_emb = copy.deepcopy(S_fin)
         try:
             S_fin = S_fin + self.H
         except:
             print("no prior anchors")
             pass
         
-        adj_matrix = np.zeros((len(index) * len(columns), 3))
+        sim_matrix = np.zeros((len(index) * len(columns), 3))
         for i in range(len(index)):
             for j in range(len(columns)):
-                adj_matrix[i * len(columns) + j, 0] = index[i] 
-                adj_matrix[i * len(columns) + j, 1] = columns[j]
-                adj_matrix[i * len(columns) + j, 2] = S_fin[self.idx1_dict[index[i]],self.idx2_dict[columns[j]]] 
-        #adj_matrix[:, 2] = list(map(clip, adj_matrix[:, 2])) ## clip 써야하는지도 검증해보길
+                sim_matrix[i * len(columns) + j, 0] = index[i] 
+                sim_matrix[i * len(columns) + j, 1] = columns[j]
+                sim_matrix[i * len(columns) + j, 2] = S_fin[self.idx1_dict[index[i]], self.idx2_dict[columns[j]]] 
         if len(seed_list1) != 0:
-            print("calculate jaccard sim..")
-            if self.G1.number_of_nodes() > self.G2.number_of_nodes():
-                adj_matrix2 = caculate_jaccard_coefficient(self.G1, self.G2, seed_list1, seed_list2, index, columns, alpha = 1/self.ratio, beta = 1)
-            else:
-                adj_matrix2 = caculate_jaccard_coefficient(self.G1, self.G2, seed_list1, seed_list2, index, columns, alpha = 1, beta = self.ratio)
-            adj_matrix[:, 2] *= adj_matrix2[:, 2]
+            print("Tversky sim calculation..")
+            sim_matrix2 = calculate_Tversky_coefficient(self.G1, self.G2, seed_list1, seed_list2, index, columns, alpha = self.alpha, beta = self.beta)
+            sim_matrix[:, 2] *= sim_matrix2[:, 2]
         else:
-            adj_matrix2 = 1 # no effect
-
-        adj_matrix = adj_matrix[np.argsort(-adj_matrix[:, 2])]
+            sim_matrix2 = 1 # no effect
+        sim_matrix = sim_matrix[np.argsort(-sim_matrix[:, 2])]
             
         seed1 = []
         seed2 = []
-        len_adj_matrix = len(adj_matrix)
-        if len_adj_matrix != 0:            
+        len_sim_matrix = len(sim_matrix)
+        if len_sim_matrix != 0:            
     
-            len_adj_matrix = len(adj_matrix)
-            # ,여기부분 좀 더 천천히 해서 jaccard 최대한 활용하도록 바꿔보기 douban
-           # T = np.max([5, int(len(self.alignment_dict) / 100 * (1.1 ** (iteration)))]) #여기부분도 바꿔볼수잇을듯? "매칭 넘버 펑션"
-           #  T = align_func(version = 'lin', a = 20, b = 5, i = iteration) 
-           # T = align_func(version = 'exp', a = 2, b = 5, i = iteration) 
-           # T = align_func(version = 'log', a = 3**(100), b = 5, i = iteration) 
-            T = align_func(version = 'const', a = int(len(self.alignment_dict)/15), b = 0, i = iteration) 
+            len_sim_matrix = len(sim_matrix)
+            T = align_func(version = 'const', a = int(len(self.alignment_dict)/5), b = 0, i = iteration) 
 
-            #lin, exp, log
-           # T = 1500
-
-            while len(adj_matrix) > 0 and T > 0:
+            while len(sim_matrix) > 0 and T > 0:
                 T -= 1
-                node1, node2 = int(adj_matrix[0, 0]), int(adj_matrix[0, 1])
+                node1, node2 = int(sim_matrix[0, 0]), int(sim_matrix[0, 1])
                 seed1.append(node1)
                 seed2.append(node2)
-                adj_matrix = adj_matrix[adj_matrix[:, 0] != node1, :]
-                adj_matrix = adj_matrix[adj_matrix[:, 1] != node2, :]
-            anchor = len(seed_list1)
+                sim_matrix = sim_matrix[sim_matrix[:, 0] != node1, :]
+                sim_matrix = sim_matrix[sim_matrix[:, 1] != node2, :]
 
-        anchor = len(seed_list1)
         seed_list1 += seed1
         seed_list2 += seed2
         print('Add seed nodes : {}'.format(len(seed1)))
+        print(f'{iteration} iter completed')
+        
         self.Evaluation(seed_list1, seed_list2)
         
-        return seed_list1, seed_list2, anchor, S_fin, adj_matrix2
+        return seed_list1, seed_list2, S_fin, sim_matrix2, S_emb
     
-    def EvolveGraph(self, seed_list1, seed_list2, S):
 
-        pred1, pred2 = self.cross_link(self.lp_thresh, self.G1, self.G2, seed_list1, seed_list2, S)
-        
-        print("{} edges are added in total".format(len(pred1)+len(pred2)))
-        self.G1.add_edges_from(pred1, weight = self.default_weight)
-        self.G2.add_edges_from(pred2, weight = self.default_weight)
-
-        #Compute AUC
-        # pred_final = pred_all
-        # label_final = np.array(label_all)
-        # fpr, tpr, thresholds = metrics.roc_curve(label_final, pred_final)
-
-        return self.G1, self.G2
         
     def Evaluation(self, seed_list1, seed_list2):
         count = 0
@@ -336,14 +351,28 @@ class GradAlign:
         train_len = int(self.train_ratio * len(self.alignment_dict))
         print('Prediction accuracy  at this iteration : %.2f%%'%(100 * (count-train_len) / (len(seed_list1)-train_len)))        
         print('All accuracy : %.2f%%'%(100*(count / len(self.alignment_dict))))    
-    
+        print('All prediction accuracy : %.2f%%'%(100*((count - train_len) /(len(self.alignment_dict)-train_len))))    
+        
     def FinalEvaluation(self, S, embedding1, embedding2, seed_list1, seed_list2, idx1_dict, idx2_dict, adj2):
+        
+        count = 0
+
+        for i in range(len(seed_list1)):
+            try:
+                if self.alignment_dict[seed_list1[i]] == seed_list2[i]:
+                    count += 1
+            except:
+                continue
+
+        train_len = int(self.train_ratio * len(self.alignment_dict))      
+        print('All accuracy : %.2f%%'%(100*(count / len(self.alignment_dict)))) 
+        acc = count / len(self.alignment_dict)
+        
         #input embeddings are final embedding
         index = list(self.G1.nodes())
         columns = list(self.G2.nodes())
         if self.eval_mode == True:
-            adj2 = caculate_jaccard_coefficient_final(self.G1, self.G2, seed_list1, seed_list2, index, columns)
-            # #convert adj to S
+            adj2 = calculate_Tversky_coefficient_final(self.G1, self.G2, seed_list1, seed_list2, index, columns, alpha = self.alpha, beta = self.beta)
             S_prime = self.adj2S(adj2, self.G1.number_of_nodes(), self.G2.number_of_nodes())
             S *= S_prime
     
@@ -357,13 +386,13 @@ class GradAlign:
         top5_eval = compute_precision_k(top_5, gt_dict, idx1_dict, idx2_dict)
         top10_eval = compute_precision_k(top_10, gt_dict, idx1_dict, idx2_dict)
 
-
-        #train_len = int(self.train_ratio * len(self.alignment_dict))
         print('Success@1 : {:.4f}'.format(top1_eval))
         print('Success@5 : {:.4f}'.format(top5_eval))
         print('Success@10 : {:.4f}'.format(top10_eval))
         
-        return S
+        result = '@1:' + str(round(top1_eval,4)) + ',  @5:' + str(round(top5_eval,4))+ ',  @10:' + str(round(top10_eval,4))+ ',  Acc:'+ str(round(acc,4))
+        
+        return S, result
         
 
     def adj2S(self, adj, m, n):
@@ -386,16 +415,11 @@ class GradAlign:
         
         return linkpred_losss
     
-    def edge_weight_update(self, G, seed_list):
-    
-        for seed in seed_list:
-            for nbr in list(nx.neighbors(G, seed)):
-                G.edges[seed,nbr]['weight'] *= self.p 
                 
-    def new_Laplacian_graph(self, A):
+    def distinctive_loss(self, A):
     
         A_hat_list = []
-        A_hat_list.append(None) #empty element for future iteration
+        A_hat_list.append(None) # empty element for future iteration
         for i in range(len(A)):
             A[i, i] = 1
         A = torch.FloatTensor(A)        
@@ -488,10 +512,119 @@ class myGCN(nn.Module):
             
         return emb_list
     
+
+class myGIN(nn.Module):
+    def __init__(self, in_channels, hidden_channels, num_layers):        
+        super(myGIN, self).__init__()
+        self.num_layers = num_layers
+        self.convs = nn.ModuleList()
+        for i in range(num_layers):
+            in_channels = in_channels if i == 0 else hidden_channels
+            self.convs.append(
+                GINConv(
+                    Sequential(
+                        Linear(in_channels, hidden_channels),
+                        ReLU(),
+                        Linear(hidden_channels, hidden_channels),
+                        ReLU(),
+                        BN(hidden_channels),
+                    ), train_eps=False, aggr = 'add'))
+        init_weight(self.modules())
+
+    def full_forward(self, x, edge_index):
+        emb_list = []
+        emb_list.append(x)
+        for i, conv in enumerate(self.convs):
+            x = conv(x, edge_index)
+            x = x.tanh()
+            emb_list.append(x)
+            
+        return emb_list
+    
+class AttentionCombinedGNN(nn.Module):
+    def __init__(self, Attention, GNN):
+        super(AttentionCombinedGNN, self).__init__()
+        self.att_model = Attention
+        self.GNN_model = GNN
+
+        
+    def full_forward(self, x_org, x_aug, edge_index):
+        x = self.att_model(x_org, x_aug)
+        x = self.GNN_model.full_forward(x, edge_index)
+        return x
+        
+
+
+class FeatureAttention(nn.Module):
+    
+    def __init__(self, org_dim, aug_dim, hid_dim):        
+        super(FeatureAttention, self).__init__()
+        
+        self.org_layer = Linear(org_dim, hid_dim)
+        self.aug_layer = Linear(aug_dim, hid_dim)
+
+        self.org_att_layer = Linear(org_dim, 1)
+        self.aug_att_layer = Linear(aug_dim, 1)
+
+        init_weight(self.modules())
+
+    def forward(self, x_org, x_aug):
+        
+        x_org_feed = self.org_layer(x_org)
+        x_aug_feed = self.aug_layer(x_aug)
+        att1 = self.org_att_layer(x_org)
+        att2 = self.aug_att_layer(x_aug)
+        att_cat = torch.cat((att1, att2), dim=1)
+        softmax = nn.Softmax(dim=1)
+        self.att_score = softmax(att_cat)
+        x_fin = self.att_score[:,0].view(len(x_org),1) * x_org_feed + \
+            self.att_score[:,1].view(len(x_org),1) * x_aug_feed
+        return x_fin
+    
+    
+    
+def softmax_attention(a,b):
+    return math.exp(a)/(math.exp(a)+math.exp(b)), math.exp(b)/(math.exp(a)+math.exp(b))
+
+# class BalancedAttentionGNN(nn.Module):
+    
+#     def __init__(self, in_channels, mid_channels, hidden_channels, num_layers):        
+#         super(BalancedAttentionGNN, self).__init__()
+#         self.num_layers = num_layers
+#         self.convs = nn.ModuleList()
+#         for i in range(num_layers):
+#             if i ==0:
+#                 self.convs.append(Linear(in_channels, mid_channels))
+#             in_channels = mid_channels if i == 0 else hidden_channels            
+#             self.convs.append(
+#                 GINConv(
+#                     Sequential(
+#                         Linear(in_channels, hidden_channels),
+#                         ReLU(),
+#                         Linear(hidden_channels, hidden_channels),
+#                         ReLU(),
+#                         BN(hidden_channels),
+#                     ), train_eps=False, aggr = 'add'))
+#         init_weight(self.modules())
+
+#     def full_forward(self, x, edge_index):
+#         emb_list = []
+#         emb_list.append(x)
+#         for i, conv in enumerate(self.convs):
+#             if i ==0:
+#                 x = conv(x)
+#             else:
+#                 x = conv(x, edge_index)
+#                 x = x.tanh()
+#             emb_list.append(x)
+            
+#         return emb_list
+    
+    
     
 class mySAGE(nn.Module):
     def __init__(self, in_channels, hidden_channels, num_layers):        
-        super(myGCN, self).__init__()
+        super(mySAGE, self).__init__()
         
         self.num_layers = num_layers
         self.convs = nn.ModuleList()
@@ -521,52 +654,9 @@ def init_weight(modules):
     for m in modules:
         if isinstance(m, nn.Linear):
             m.weight.data = init.xavier_uniform_(m.weight.data) #, gain=nn.init.calculate_gain(activation.lower()))
-
-        # if m.bias is not None:
-        #     m.bias.data = init.constant_(m.bias.data, 0.0)
     
-    
- 
-'''---- ------------------- Methods in the middle of algorithm -------------------------------------------'''
 
 
-
-def align_func(version, a, b, i):
-    
-    if version == "lin":
-        return int(a*i + b)
-    elif version == "exp":
-        return int(a**i + b)
-    elif version == "log":    
-        return int(math.log(a*i+b) + b)
-    elif version == "const":
-        return a
-
-
-def cal_degree_dict(G_list, G, layer):
-    G_degree = G.degree()
-    degree_dict = {}
-    degree_dict[0] = {}
-    for node in G_list:
-        degree_dict[0][node] = {node}
-    for i in range(1, layer + 1):
-        degree_dict[i] = {}
-        for node in G_list:
-            neighbor_set = []
-            for neighbor in degree_dict[i - 1][node]:
-                neighbor_set += nx.neighbors(G, neighbor)
-            neighbor_set = set(neighbor_set)
-            for j in range(i - 1, -1, -1):
-                neighbor_set -= degree_dict[j][node]
-            degree_dict[i][node] = neighbor_set
-    for i in range(layer + 1):
-        for node in G_list:
-            if len(degree_dict[i][node]) == 0:
-                degree_dict[i][node] = [0]
-            else:
-                degree_dict[i][node] = node_to_degree(G_degree, degree_dict[i][node])
-    return degree_dict
-    
 def seed_link(seed_list1, seed_list2, G1, G2):
     k = 0
     for i in range(len(seed_list1) - 1):
@@ -580,122 +670,139 @@ def seed_link(seed_list1, seed_list2, G1, G2):
     print('Add seed links : {}'.format(k), end = '\t')
     return G1, G2
 
-def node_to_degree(G_degree, SET):
-    SET = list(SET)
-    SET = sorted([G_degree[x] for x in SET])
-    return SET
+def normalized_adj(G):
+    # make sure ordering has ascending order
+    deg = dict(G.degree)
+    deg = sorted(deg.items())
+    deglist = [math.pow(b, -0.5) for (a,b) in deg]
+    degarr = np.array(deglist)
+    degarr = np.expand_dims(degarr, axis = 0)
+    return degarr.T
+
+
+def align_func(version, a, b, i):
     
-def caculate_jaccard_coefficient(G1, G2, seed_list1, seed_list2, index, columns, alpha, beta, alignment_dict = None):
-    mul = int(np.max([np.max(G1.nodes()), np.max(G2.nodes())]))
+    if version == "lin":
+        return int(a*i + b)
+    elif version == "exp":
+        return int(a**i + b)
+    elif version == "log":    
+        return int(math.log(a*i+b) + b)
+    elif version == "const":
+        return a
+
+def calculate_Tversky_coefficient(G1, G2, seed_list1, seed_list2, index, columns, alpha, beta, alignment_dict = None):
+    
+    start = time.time()
+    
+    shift = int(np.max([np.max(G1.nodes()), np.max(G2.nodes())]))
     seed1_dict = {}
     seed1_dict_reversed = {}
     seed2_dict = {}
     seed2_dict_reversed = {}
     for i in range(len(seed_list1)):
-        seed1_dict[i + 2 * (mul + 1)] = seed_list1[i]
-        seed1_dict_reversed[seed_list1[i]] = i + 2 * (mul + 1)
-        seed2_dict[i + 2 * (mul + 1)] = seed_list2[i] + mul + 1
-        seed2_dict_reversed[seed_list2[i] + mul + 1] = i + 2 * (mul + 1)
+        seed1_dict[i + 2 * (shift + 1)] = seed_list1[i]
+        seed1_dict_reversed[seed_list1[i]] = i + 2 * (shift + 1)
+        seed2_dict[i + 2 * (shift + 1)] = seed_list2[i] + shift + 1
+        seed2_dict_reversed[seed_list2[i] + shift + 1] = i + 2 * (shift + 1)
     G1_edges = pd.DataFrame(G1.edges())
     G1_edges.iloc[:, 0] = G1_edges.iloc[:, 0].apply(lambda x:to_seed(x, seed1_dict_reversed))
     G1_edges.iloc[:, 1] = G1_edges.iloc[:, 1].apply(lambda x:to_seed(x, seed1_dict_reversed))
-    G1_edges.iloc[:, 0] = G1_edges.iloc[:, 0].apply(lambda x:to_seed(x, seed1_dict_reversed))
     G2_edges = pd.DataFrame(G2.edges())
-    G2_edges += mul + 1
+    G2_edges += shift + 1
     G2_edges.iloc[:, 0] = G2_edges.iloc[:, 0].apply(lambda x:to_seed(x, seed2_dict_reversed))
     G2_edges.iloc[:, 1] = G2_edges.iloc[:, 1].apply(lambda x:to_seed(x, seed2_dict_reversed))
     adj = nx.Graph()
     adj.add_edges_from(np.array(G1_edges))
     adj.add_edges_from(np.array(G2_edges))
-    jaccard_dict = {}
+    Tversky_dict = {}
     for G1_node in index:
         for G2_node in columns:
-            if (G1_node, G2_node) not in jaccard_dict.keys():
-                jaccard_dict[G1_node, G2_node] = 0
+            if (G1_node, G2_node) not in Tversky_dict.keys():
+                Tversky_dict[G1_node, G2_node] = 0
             try:
-                jaccard_dict[G1_node, G2_node] += calculate_adj(adj.neighbors(G1_node), adj.neighbors(G2_node + mul + 1))
-                jaccard_dict[G1_node, G2_node] += calculate_Tversky(adj.neighbors(G1_node), adj.neighbors(G2_node + mul + 1), alpha, beta)
+                #Tversky_dict[G1_node, G2_node] += calculate_Tversky(adj.neighbors(G1_node), adj.neighbors(G2_node + shift + 1), alpha, beta)
+                Tversky_dict[G1_node, G2_node] += calculate_new(adj.neighbors(G1_node), adj.neighbors(G2_node + shift + 1), alpha, beta)
             except:
                 continue
-                     
-    jaccard_dict = [[x[0][0], x[0][1], x[1]] for x in jaccard_dict.items()]
-    adj_matrix = np.array(jaccard_dict)
-    return adj_matrix
+    Tversky_dict = [[x[0][0], x[0][1], x[1]] for x in Tversky_dict.items()]
+    sim_matrix = np.array(Tversky_dict)
+    
+    print(f'{time.time()-start} sec elapsed for Tversky')
+    return sim_matrix
 
-def caculate_jaccard_coefficient_final(G1, G2, seed_list1, seed_list2, index, columns):
-    mul = int(np.max([np.max(G1.nodes()), np.max(G2.nodes())]))
+def calculate_Tversky_coefficient_test(G1, G2, seed_list1, seed_list2, index, columns, alpha, beta, alignment_dict = None):
+    
+    start = time.time()
+    
+    shift = int(np.max([np.max(G1.nodes()), np.max(G2.nodes())]))
     seed1_dict = {}
     seed1_dict_reversed = {}
     seed2_dict = {}
     seed2_dict_reversed = {}
     for i in range(len(seed_list1)):
-        seed1_dict[i + 2 * (mul + 1)] = seed_list1[i]
-        seed1_dict_reversed[seed_list1[i]] = i + 2 * (mul + 1)
-        seed2_dict[i + 2 * (mul + 1)] = seed_list2[i] + mul + 1
-        seed2_dict_reversed[seed_list2[i] + mul + 1] = i + 2 * (mul + 1)
+        seed1_dict[i + 2 * (shift + 1)] = seed_list1[i]
+        seed1_dict_reversed[seed_list1[i]] = i + 2 * (shift + 1)
+        seed2_dict[i + 2 * (shift + 1)] = seed_list2[i] + shift + 1
+        seed2_dict_reversed[seed_list2[i] + shift + 1] = i + 2 * (shift + 1)
     G1_edges = pd.DataFrame(G1.edges())
     G1_edges.iloc[:, 0] = G1_edges.iloc[:, 0].apply(lambda x:to_seed(x, seed1_dict_reversed))
     G1_edges.iloc[:, 1] = G1_edges.iloc[:, 1].apply(lambda x:to_seed(x, seed1_dict_reversed))
-    #G1_edges.iloc[:, 0] = G1_edges.iloc[:, 0].apply(lambda x:to_seed(x, seed1_dict_reversed))
     G2_edges = pd.DataFrame(G2.edges())
-    G2_edges += mul + 1
+    G2_edges += shift + 1
     G2_edges.iloc[:, 0] = G2_edges.iloc[:, 0].apply(lambda x:to_seed(x, seed2_dict_reversed))
     G2_edges.iloc[:, 1] = G2_edges.iloc[:, 1].apply(lambda x:to_seed(x, seed2_dict_reversed))
-   
     adj = nx.Graph()
     adj.add_edges_from(np.array(G1_edges))
     adj.add_edges_from(np.array(G2_edges))
-    jaccard_dict = {}
-    
+    Tversky_dict = {}
     for G1_node in index:
         for G2_node in columns:
-            jaccard_dict[G1_node, G2_node] = 0
+            if (G1_node, G2_node) not in Tversky_dict.keys():
+                Tversky_dict[G1_node, G2_node] = 0
+            try:
+                #Tversky_dict[G1_node, G2_node] += calculate_Tversky(adj.neighbors(G1_node), adj.neighbors(G2_node + shift + 1), alpha, beta)
+                Tversky_dict[G1_node, G2_node] += calculate_new(adj.neighbors(G1_node), adj.neighbors(G2_node + shift + 1), alpha, beta)
+            except:
+                continue
+    Tversky_dict = [[x[0][0], x[0][1], x[1]] for x in Tversky_dict.items()]
+    sim_matrix = np.array(Tversky_dict)
+    
+    print(f'{time.time()-start} sec elapsed for Tversky')
+    return sim_matrix
 
+def calculate_Tversky_coefficient_final(G1, G2, seed_list1, seed_list2, index, columns, alpha, beta):
+    shift = int(np.max([np.max(G1.nodes()), np.max(G2.nodes())]))
+    seed1_dict = {}
+    seed1_dict_reversed = {}
+    seed2_dict = {}
+    seed2_dict_reversed = {}
+    for i in range(len(seed_list1)):
+        seed1_dict[i + 2 * (shift + 1)] = seed_list1[i]
+        seed1_dict_reversed[seed_list1[i]] = i + 2 * (shift + 1)
+        seed2_dict[i + 2 * (shift + 1)] = seed_list2[i] + shift + 1
+        seed2_dict_reversed[seed_list2[i] + shift + 1] = i + 2 * (shift + 1)
+    G1_edges = pd.DataFrame(G1.edges())
+    G1_edges.iloc[:, 0] = G1_edges.iloc[:, 0].apply(lambda x:to_seed(x, seed1_dict_reversed))
+    G1_edges.iloc[:, 1] = G1_edges.iloc[:, 1].apply(lambda x:to_seed(x, seed1_dict_reversed))
+    G2_edges = pd.DataFrame(G2.edges())
+    G2_edges += shift + 1
+    G2_edges.iloc[:, 0] = G2_edges.iloc[:, 0].apply(lambda x:to_seed(x, seed2_dict_reversed))
+    G2_edges.iloc[:, 1] = G2_edges.iloc[:, 1].apply(lambda x:to_seed(x, seed2_dict_reversed))
+    adj = nx.Graph()
+    adj.add_edges_from(np.array(G1_edges))
+    adj.add_edges_from(np.array(G2_edges))
+    Tversky_dict = {}  
+    for G1_node in index:
+        for G2_node in columns:
+            Tversky_dict[G1_node, G2_node] = 0
             g1 = to_seed(G1_node, seed1_dict_reversed)
-            g2 = to_seed(G2_node + mul + 1, seed2_dict_reversed)
-            jaccard_dict[G1_node, G2_node] += calculate_adj(adj.neighbors(g1), adj.neighbors(g2))
-
-                     
-    jaccard_dict = [[x[0][0], x[0][1], x[1]] for x in jaccard_dict.items()]
-    adj_matrix = np.array(jaccard_dict)
-    return adj_matrix
-
-
-
-
-def clip(x):
-    if x <= 0:
-        return 0
-    else:
-        return x
-    
-    
-def calculate_adj(setA, setB):
-    setA = set(setA)
-    setB = set(setB)
-    ep = 0.5
-    inter = len(setA & setB) + ep
-    union = len(setA | setB) + ep
-    adj = inter / union
-    return adj
-
-def calculate_Tversky(setA, setB, alpha, beta):
-    setA = set(setA)
-    setB = set(setB)   
-    ep = 0.01
-        
-    inter = len(setA & setB) + ep
-    union = len(setA | setB) + ep
-    diffA = len(setA - setB) 
-    diffB = len(setB - setA)
-     
-    Tver = inter / (union + alpha*diffA + beta*diffB)
-    
-    return Tver
-    
-
-
-
+            g2 = to_seed(G2_node + shift + 1, seed2_dict_reversed)
+            #Tversky_dict[G1_node, G2_node] += calculate_Tversky(adj.neighbors(g1), adj.neighbors(g2), alpha, beta)
+            Tversky_dict[G1_node, G2_node] += calculate_new(adj.neighbors(g1), adj.neighbors(g2), alpha, beta)
+    Tversky_dict = [[x[0][0], x[0][1], x[1]] for x in Tversky_dict.items()]
+    sim_matrix = np.array(Tversky_dict)
+    return sim_matrix
 
 def to_seed(x, dictionary):
     try:
@@ -703,24 +810,54 @@ def to_seed(x, dictionary):
     except:
         return x
 
-
-
-def Laplacian_graph(A):
-    
-    for i in range(len(A)):
-        A[i, i] = 1
-    A = torch.FloatTensor(A)
-    D_ = torch.diag(torch.sum(A, 0)**(-0.5))
-    A_hat = torch.matmul(torch.matmul(D_,A),D_)
-    A_hat = A_hat.float()
-    indices = torch.nonzero(A_hat).t()
-    values = A_hat[indices[0], indices[1]]
-    A_hat = torch.sparse.FloatTensor(indices, values, A_hat.size())
-    
-    return A_hat
-
-
+def calculate_Tversky(setA, setB, alpha, beta):
+    setA = set(setA)
+    setB = set(setB)   
+    ep = 0.01
         
-
+    inter = len(setA & setB) + ep
+    #union = len(setA | setB) + ep
+    diffA = len(setA - setB) 
+    diffB = len(setB - setA)
+     
+    Tver = inter / (inter + alpha*diffA + beta*diffB)
     
+    return Tver
 
+def calculate_new(setA, setB, alpha, beta):
+    setA = set(setA)
+    setB = set(setB)  
+    
+    ep = 0.01
+    ep2 = max(len(setA),len(setB))
+        
+    ACNs = len(setA & setB) + ep
+     
+    #Tver = ACNs**2 / (abs(len(setA) - len(setB)) + ep2)
+    
+    return ACNs**2
+
+def top_k(S, k=1):
+    """
+    S: scores, numpy array of shape (M, N) where M is the number of source nodes,
+        N is the number of target nodes
+    k: number of predicted elements to return
+    """
+    top = np.argsort(-S)[:,:k]
+    result = np.zeros(S.shape)
+    for idx, target_elms in enumerate(top):
+        for elm in target_elms:
+            result[idx,elm] = 1
+        
+    return result
+
+def compute_precision_k(top_k_matrix, gt, idx1_dict, idx2_dict):
+    n_matched = 0
+
+    if type(gt) == dict:
+        for key, value in gt.items():
+            if top_k_matrix[idx1_dict[key], idx2_dict[value]] == 1:
+                n_matched += 1
+        return n_matched/len(gt)
+    
+    return n_matched/n_nodes

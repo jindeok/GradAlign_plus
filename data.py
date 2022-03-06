@@ -227,36 +227,6 @@ def perturb_edge_pair_real(G1, G2, dictionary, com_portion = 0.1, rand_portion =
             G2.remove_edges_from(e)
             
     return G1, G2
-def plot_degree_hist(G):
-    degree_sequence = sorted((d for n, d in G.degree()), reverse=True)
-    dmax = max(degree_sequence)
-
-    fig = plt.figure("Degree of a random graph", figsize=(8, 8))
-    # Create a gridspec for adding subplots of different sizes
-    axgrid = fig.add_gridspec(5, 4)
-
-    ax0 = fig.add_subplot(axgrid[0:3, :])
-    Gcc = G.subgraph(sorted(nx.connected_components(G), key=len, reverse=True)[0])
-    pos = nx.spring_layout(Gcc, seed=10396953)
-    nx.draw_networkx_nodes(Gcc, pos, ax=ax0, node_size=20)
-    nx.draw_networkx_edges(Gcc, pos, ax=ax0, alpha=0.4)
-    ax0.set_title("Connected components of G")
-    ax0.set_axis_off()
-
-    ax1 = fig.add_subplot(axgrid[3:, :2])
-    ax1.plot(degree_sequence, "b-", marker="o")
-    ax1.set_title("Degree Rank Plot")
-    ax1.set_ylabel("Degree")
-    ax1.set_xlabel("Rank")
-
-    ax2 = fig.add_subplot(axgrid[3:, 2:])
-    ax2.bar(*np.unique(degree_sequence[175:], return_counts=True))
-    ax2.set_title("Degree histogram")
-    ax2.set_xlabel("Degree")
-    ax2.set_ylabel("# of Nodes")
-
-    fig.tight_layout()
-    plt.show()
 
 class Dataset:
     """
@@ -529,7 +499,7 @@ def augment_attr(Gs, Gt, attr_s, attr_t, interval):
         deg_node = Gt.degree(node_t)
         init_np_t[idx_t, int(deg_node / interval) - 1] = 1
 
-        # assign이 완료된 매트릭스를 기존 attr에 attach (np.append(a,b, axis =1))
+    # assign이 완료된 매트릭스를 기존 attr에 attach (np.append(a,b, axis =1))
     new_attr_s = np.append(attr_s, init_np_s, axis=1)
     new_attr_t = np.append(attr_t, init_np_t, axis=1)
     new_attr_s = init_np_s
@@ -541,8 +511,44 @@ def augment_attr(Gs, Gt, attr_s, attr_t, interval):
 
     return new_attr_s, new_attr_t
 
+def augment_attr_khop(Gs, Gt, attr_s, attr_t, interval, k):
+    # attribute index의 순서는 G*.nodes()를 출력했을때 나오는 순서와 같음 !!
+    Gs_nodes = list(Gs.nodes())
+    Gt_nodes = list(Gt.nodes())
+    # node: khop nbr의 구성을 갖는 dict 생성
+    khopdict_source = {key : len(nx.single_source_shortest_path_length(Gs, source = key, cutoff=k)) for key in Gs_nodes}
+    khopdict_target = {key : len(nx.single_source_shortest_path_length(Gt, source = key, cutoff=k)) for key in Gt_nodes}
+    # Gs, Gt 중 max deg를 측정
+    max_deg = max(max(khopdict_source.values()), max(khopdict_target.values()))
+    print(f"max k-hop degree is {max_deg}")
+    # interval을 기준으로 했을 때, 늘어나는 속성 개수를 계산
+    num_attr = math.ceil(max_deg / interval)
+    # n_s * num_attr 의 속성 벡터를 0 value로 초기화
+    init_np_s = np.zeros((Gs.number_of_nodes(), num_attr))
+    init_np_t = np.zeros((Gt.number_of_nodes(), num_attr))
 
-def augment_attr_bin(Gs, Gt, attr_s, attr_t, interval):
+    # 각 노드마다 deg를 측정하여 attr를 init_np에 assign
+    for idx_s, node_s in enumerate(Gs.nodes()):
+        deg_node = Gs.degree(node_s)
+        init_np_s[idx_s, int(deg_node / interval) - 1] = 1
+
+    for idx_t, node_t in enumerate(Gt.nodes()):
+        deg_node = Gt.degree(node_t)
+        init_np_t[idx_t, int(deg_node / interval) - 1] = 1
+
+    # assign이 완료된 매트릭스를 기존 attr에 attach (np.append(a,b, axis =1))
+    new_attr_s = np.append(attr_s, init_np_s, axis=1)
+    new_attr_t = np.append(attr_t, init_np_t, axis=1)
+    new_attr_s = init_np_s
+    new_attr_t = init_np_t
+    # 만약 len(attr_s) == 1 (plain network) 의 경우, 그냥 attr을 대체하면 된다.
+    if len(attr_s) == 1:
+        new_attr_s = new_attr_s[:, 1:]
+        new_attr_t = new_attr_t[:, 1:]
+
+    return new_attr_s, new_attr_t
+
+def augment_attr_bin(Gs, Gt, attr_s, attr_t):
     # attribute index의 순서는 G*.nodes()를 출력했을때 나오는 순서와 같음 !!
 
     # Gs, Gt 중 max deg를 측정

@@ -33,7 +33,6 @@ from tqdm import trange
 import time
 import IPython
 
-import math 
 '''GraphConv -> add Activation / Normalization '''
 
 class GradAlign:
@@ -42,7 +41,10 @@ class GradAlign:
         self.G1 = G1
         self.G2 = G2
         self.layer = k_hop
-    
+        
+        #balancing
+        #self.c = 0.9
+        self.lam = 0.3
         
         self.att_s = att_s
         self.att_t = att_t
@@ -51,12 +53,11 @@ class GradAlign:
         
         self.epochs = 30       
         self.hid_channel = hid
-        self.mid_channel = hid
         
         self.default_weight = 1.0
         
         self.device = torch.device('cpu')    
-
+        #self.device = torch.device('cuda')   
         self.alignment_dict = alignment_dict
         self.alignment_dict_reversed =alignment_dict_reversed
 
@@ -75,19 +76,24 @@ class GradAlign:
         
         #mode config
         self.eval_mode = True
+        self.cea_mode = False
+
         
-        #self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') #  temporarily disabled
+        #self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') # disable temporarily because of error
         
-    def run_algorithm(self): 
-        torch.autograd.set_detect_anomaly(True) 
+    def run_algorithm(self): #anchor is not considered yet
+        
         iteration = 0
         
-        #Construct learning models
-        att_model = FeatureAttention(len(self.att_s.T), len(self.att_aug_s.T), self.mid_channel)        
-        att_model  = att_model.to(self.device)
-        GNN_model = myGIN(self.mid_channel, hidden_channels=self.hid_channel, num_layers = self.layer)
-        GNN_model = GNN_model.to(self.device)
-        tot_model = AttentionCombinedGNN(att_model, GNN_model)
+        #Construct GNN
+
+       # model = myGNN_hidden(len(self.att_s.T), hidden_channels=self.hid_channel, num_layers = self.layer)
+       # model = myGCN(len(self.att_s.T), hidden_channels=self.hid_channel, num_layers = self.layer)
+        model = myGIN(len(self.att_s.T), hidden_channels=self.hid_channel, num_layers = self.layer)
+        model_aug = myGIN(len(self.att_aug_s.T), hidden_channels=self.hid_channel, num_layers = self.layer)
+        
+        model = model.to(self.device)
+        model_aug = model_aug.to(self.device)
         
         if self.train_ratio == 0:
             seed_list1 = []
@@ -128,18 +134,22 @@ class GradAlign:
                 # GNN Embedding Update
                 data_s, x_s, edge_index_s, edge_weight_s = self.convert2torch_data(self.G1, self.att_s) 
                 data_t, x_t, edge_index_t, edge_weight_t = self.convert2torch_data(self.G2, self.att_t)
-
+                
+                # GNN-2
                 data_aug_s, x_aug_s, edge_index_aug_s, edge_weight_aug_s = self.convert2torch_data(self.G1, self.att_aug_s) 
                 data_aug_t, x_aug_t, edge_index_aug_t, edge_weight_aug_t = self.convert2torch_data(self.G2, self.att_aug_t)
-                
-                embedding1, embedding2 = self.embedding(seed_list1, seed_list2, iteration, self.epochs, x_s, x_aug_s, edge_index_s, x_t, x_aug_t, edge_index_t,  tot_model, data_s, data_t)
 
+
+            if iteration == 0:
+                embedding1, embedding2 = self.embedding(seed_list1, seed_list2, iteration, self.epochs, x_s, edge_index_s, edge_weight_s, x_t, edge_index_t, edge_weight_t, model, data_s, data_t)
+                embedding_aug1, embedding_aug2 = self.embedding(seed_list1, seed_list2, iteration, self.epochs, x_aug_s, edge_index_aug_s, edge_weight_aug_s, x_aug_t, edge_index_aug_t, edge_weight_aug_t, model_aug, data_aug_s, data_aug_t)
+
+            # Update graph
             print('\n start adding a seed nodes')
             if iteration == 0:
-                seed_list1, seed_list2, S, adj2, S_emb = self.AddSeeds_ver2_init(embedding1, embedding2, index, columns, seed_list1, seed_list2, iteration)
+                seed_list1, seed_list2, S, adj2, S_emb = self.AddSeeds_ver2_init(embedding1, embedding2, embedding_aug1, embedding_aug2, index, columns, seed_list1, seed_list2, iteration)
             else:
-                seed_list1, seed_list2, S, adj2 = self.AddSeeds_ver2(S_emb, embedding1, embedding2, index, columns, seed_list1, seed_list2, iteration)
-
+                seed_list1, seed_list2, S, adj2 = self.AddSeeds_ver2(S_emb, embedding1, embedding2, embedding_aug1, embedding_aug2, index, columns, seed_list1, seed_list2, iteration)
             iteration += 1
             
             
@@ -149,7 +159,7 @@ class GradAlign:
         self.Evaluation(seed_list1, seed_list2)
         S_prime, result = self.FinalEvaluation(S, embedding1, embedding2, seed_list1, seed_list2, self.idx1_dict, self.idx2_dict, adj2)
         
-        return S, S_prime, seed_list1, seed_list2, result, att_model.att_score
+        return S, S_prime, seed_list1, seed_list2, result
 
     
     def convert2torch_data(self, G, att):      
@@ -179,7 +189,7 @@ class GradAlign:
         
         return attr1_norm, attr2_norm
         
-    def embedding(self, seed_list1, seed_list2, match_iter, epoch, x_s, x_aug_s, edge_index_s, x_t, x_aug_t, edge_index_t, model, data_s, data_t):
+    def embedding(self, seed_list1, seed_list2, match_iter, epoch, x_s, edge_index_s, edge_weight_s, x_t, edge_index_t, edge_weight_t, model, data_s, data_t):
 
         seed_1_idx_list = [self.idx1_dict[a] for a in seed_list1]
         seed_1_idx_list = torch.LongTensor(seed_1_idx_list)        
@@ -190,8 +200,8 @@ class GradAlign:
         
         A_s = nx.adjacency_matrix(self.G1)
         A_t = nx.adjacency_matrix(self.G2)
-        A_hat_s_list = self.distinctive_loss(A_s.todense())
-        A_hat_t_list = self.distinctive_loss(A_t.todense())
+        A_hat_s_list = self.aggregated_adj(A_s.todense())
+        A_hat_t_list = self.aggregated_adj(A_t.todense())
         
         t = trange(epoch, desc='EMB')            
         model.train()
@@ -200,11 +210,8 @@ class GradAlign:
             total_loss = 0
             
             #for loss test GIN
-            embedding_s = model.full_forward(x_s, x_aug_s, edge_index_s)
-            embedding_t = model.full_forward(x_t, x_aug_t, edge_index_t)
-            # others
-            # embedding_s = model.full_forward(x_s, edge_index_s, edge_weight_s)
-            # embedding_t = model.full_forward(x_t, edge_index_t, edge_weight_t)
+            embedding_s = model.full_forward(x_s, edge_index_s)
+            embedding_t = model.full_forward(x_t, edge_index_t)
             
             optimizer.zero_grad()
             loss = 0
@@ -212,28 +219,29 @@ class GradAlign:
                 #multi-layer-loss
                 if i == 0:
                     continue                
-                consistency_loss_s = self.linkpred_loss(emb_s, A_hat_s)
-                consistency_loss_t = self.linkpred_loss(emb_t, A_hat_t)
+                consistency_loss_s = self.layer_wise_recon_loss(emb_s, A_hat_s)
+                consistency_loss_t = self.layer_wise_recon_loss(emb_t, A_hat_t)
                 loss += consistency_loss_s + consistency_loss_t
    
-            loss.backward(retain_graph=True)
+            loss.backward()
             optimizer.step()                
             total_loss += float(loss)
             t.set_description('EMB (total_loss=%g)' % (total_loss))
             
         #for test GIN
-        embedding_s = model.full_forward(x_s, x_aug_s, edge_index_s)        
-        embedding_t = model.full_forward(x_t, x_aug_t, edge_index_t)
+        embedding_s = model.full_forward(x_s, edge_index_s)        
+        embedding_t = model.full_forward(x_t, edge_index_t)
               
         return embedding_s, embedding_t
-    
+
+
     def calculateH(self, gamma):
         self.H = np.zeros((self.G1.number_of_nodes(),self.G2.number_of_nodes()))
         for i, j in zip(self.pre_seed_list1,self.pre_seed_list2):
             self.H[self.idx1_dict[i],self.idx2_dict[j]] = gamma            
         return self.H
             
-    def AddSeeds_ver2(self, S_emb, embedding1, embedding2,  index, columns, seed_list1, seed_list2, iteration):
+    def AddSeeds_ver2(self, S_emb, embedding1, embedding2, embedding_aug1, embedding_aug2, index, columns, seed_list1, seed_list2, iteration):
         S_fin =S_emb
         sim_matrix = np.zeros((len(index) * len(columns), 3))
         for i in range(len(index)):
@@ -242,7 +250,8 @@ class GradAlign:
                 sim_matrix[i * len(columns) + j, 1] = columns[j]
                 sim_matrix[i * len(columns) + j, 2] = S_fin[self.idx1_dict[index[i]], self.idx2_dict[columns[j]]] 
                 
-
+           
+                
         if len(seed_list1) != 0:
             print("Tversky sim calculation..")
             sim_matrix2 = calculate_Tversky_coefficient(self.G1, self.G2, seed_list1, seed_list2, index, columns, alpha = self.alpha, beta = self.beta)
@@ -277,7 +286,7 @@ class GradAlign:
         return seed_list1, seed_list2, S_fin, sim_matrix2    
 
     
-    def AddSeeds_ver2_init(self, embedding1, embedding2, index, columns, seed_list1, seed_list2, iteration):
+    def AddSeeds_ver2_init(self, embedding1, embedding2, embedding_aug1, embedding_aug2, index, columns, seed_list1, seed_list2, iteration):
         
         S_emb1 = np.zeros((self.G1.number_of_nodes(),self.G2.number_of_nodes()))
         S_emb2 = np.zeros((self.G1.number_of_nodes(),self.G2.number_of_nodes()))
@@ -286,10 +295,18 @@ class GradAlign:
         for i, (emb1, emb2) in enumerate(zip(embedding1, embedding2)):            
             S = torch.matmul(F.normalize(emb1), F.normalize(emb2).t())
             S = S.detach().numpy()
-            S_emb1 += (1/(self.layer+1)) * S     
+            S_emb1 += (1/(self.layer+1)) * S
+
+        for i, (emb1, emb2) in enumerate(zip(embedding_aug1, embedding_aug2)):            
+            S = torch.matmul(F.normalize(emb1), F.normalize(emb2).t())
+            S = S.detach().numpy()
+            S_emb2 += (1/(self.layer+1)) * S  
             
-            
-        S_fin = S_emb1 
+        if len(self.att_s.T) == 1:
+            S_fin = S_emb2
+        else:
+            S_fin =  S_emb1 + self.lam * S_emb2
+        
         S_emb = copy.deepcopy(S_fin)
         try:
             S_fin = S_fin + self.H
@@ -336,7 +353,15 @@ class GradAlign:
         
         return seed_list1, seed_list2, S_fin, sim_matrix2, S_emb
     
+    def EvolveGraph(self, seed_list1, seed_list2, S):
 
+        pred1, pred2 = self.cross_link(self.lp_thresh, self.G1, self.G2, seed_list1, seed_list2, S)
+        
+        print("{} edges are added in total".format(len(pred1)+len(pred2)))
+        self.G1.add_edges_from(pred1, weight = self.default_weight)
+        self.G2.add_edges_from(pred2, weight = self.default_weight)
+
+        return self.G1, self.G2
         
     def Evaluation(self, seed_list1, seed_list2):
         count = 0
@@ -405,21 +430,26 @@ class GradAlign:
                 S[self.idx1_dict[index[i]], self.idx2_dict[columns[j]]] = adj[i * n + j, 2]
         return S
     
-    def linkpred_loss(self, embedding, A):
+    def layer_wise_recon_loss(self, embedding, A):
         
         pred_adj = torch.matmul(F.normalize(embedding), F.normalize(embedding).t())
         pred_adj = F.normalize((torch.min(pred_adj, torch.Tensor([1]))), dim = 1)
         
-        linkpred_losss = (pred_adj - A) ** 2
-        linkpred_losss = linkpred_losss.sum() / A.shape[1]
+        layer_wise_recon_loss = (pred_adj - A) ** 2
+        layer_wise_recon_loss = layer_wise_recon_loss.sum() / A.shape[1]
         
-        return linkpred_losss
+        return layer_wise_recon_loss
+
+    def edge_weight_update(self, G, seed_list):
     
+        for seed in seed_list:
+            for nbr in list(nx.neighbors(G, seed)):
+                G.edges[seed,nbr]['weight'] *= self.p 
                 
-    def distinctive_loss(self, A):
+    def aggregated_adj(self, A):
     
         A_hat_list = []
-        A_hat_list.append(None) # empty element for future iteration
+        A_hat_list.append(None) #empty element for future iteration
         for i in range(len(A)):
             A[i, i] = 1
         A = torch.FloatTensor(A)        
@@ -457,8 +487,7 @@ class GradAlign:
 
     
 
-        
-    
+
 class myGNN_hidden(nn.Module):
     def __init__(self, in_channels, hidden_channels, num_layers):        
         super(myGNN_hidden, self).__init__()
@@ -511,7 +540,7 @@ class myGCN(nn.Module):
             emb_list.append(x)
             
         return emb_list
-    
+
 
 class myGIN(nn.Module):
     def __init__(self, in_channels, hidden_channels, num_layers):        
@@ -540,86 +569,39 @@ class myGIN(nn.Module):
             emb_list.append(x)
             
         return emb_list
-    
-class AttentionCombinedGNN(nn.Module):
-    def __init__(self, Attention, GNN):
-        super(AttentionCombinedGNN, self).__init__()
-        self.att_model = Attention
-        self.GNN_model = GNN
-
-        
-    def full_forward(self, x_org, x_aug, edge_index):
-        x = self.att_model(x_org, x_aug)
-        x = self.GNN_model.full_forward(x, edge_index)
-        return x
-        
 
 
-class FeatureAttention(nn.Module):
-    
-    def __init__(self, org_dim, aug_dim, hid_dim):        
-        super(FeatureAttention, self).__init__()
-        
-        self.org_layer = Linear(org_dim, hid_dim)
-        self.aug_layer = Linear(aug_dim, hid_dim)
-
-        self.org_att_layer = Linear(org_dim, 1)
-        self.aug_att_layer = Linear(aug_dim, 1)
-
+class myGIN_lin(nn.Module):
+    def __init__(self, in_channels, hidden_channels, num_layers):
+        super(myGIN_lin, self).__init__()
+        self.num_layers = num_layers
+        self.convs = nn.ModuleList()
+        self.convs.append(
+            Linear(in_channels,hidden_channels)
+        )
+        for i in range(num_layers):
+            self.convs.append(
+                GINConv(
+                    Sequential(
+                        Linear(hidden_channels, hidden_channels),
+                        ReLU(),
+                        Linear(hidden_channels, hidden_channels),
+                        ReLU(),
+                        BN(hidden_channels),
+                    ), train_eps=False, aggr='add'))
         init_weight(self.modules())
 
-    def forward(self, x_org, x_aug):
-        
-        x_org_feed = self.org_layer(x_org)
-        x_aug_feed = self.aug_layer(x_aug)
-        att1 = self.org_att_layer(x_org)
-        att2 = self.aug_att_layer(x_aug)
-        att_cat = torch.cat((att1, att2), dim=1)
-        softmax = nn.Softmax(dim=1)
-        self.att_score = softmax(att_cat)
-        x_fin = self.att_score[:,0].view(len(x_org),1) * x_org_feed + \
-            self.att_score[:,1].view(len(x_org),1) * x_aug_feed
-        return x_fin
-    
-    
-    
-def softmax_attention(a,b):
-    return math.exp(a)/(math.exp(a)+math.exp(b)), math.exp(b)/(math.exp(a)+math.exp(b))
-
-# class BalancedAttentionGNN(nn.Module):
-    
-#     def __init__(self, in_channels, mid_channels, hidden_channels, num_layers):        
-#         super(BalancedAttentionGNN, self).__init__()
-#         self.num_layers = num_layers
-#         self.convs = nn.ModuleList()
-#         for i in range(num_layers):
-#             if i ==0:
-#                 self.convs.append(Linear(in_channels, mid_channels))
-#             in_channels = mid_channels if i == 0 else hidden_channels            
-#             self.convs.append(
-#                 GINConv(
-#                     Sequential(
-#                         Linear(in_channels, hidden_channels),
-#                         ReLU(),
-#                         Linear(hidden_channels, hidden_channels),
-#                         ReLU(),
-#                         BN(hidden_channels),
-#                     ), train_eps=False, aggr = 'add'))
-#         init_weight(self.modules())
-
-#     def full_forward(self, x, edge_index):
-#         emb_list = []
-#         emb_list.append(x)
-#         for i, conv in enumerate(self.convs):
-#             if i ==0:
-#                 x = conv(x)
-#             else:
-#                 x = conv(x, edge_index)
-#                 x = x.tanh()
-#             emb_list.append(x)
-            
-#         return emb_list
-    
+    def full_forward(self, x, edge_index):
+        emb_list = []
+        emb_list.append(x)
+        for i, conv in enumerate(self.convs):
+            if i==0:
+                x = conv(x)
+            else:
+                x = conv(x, edge_index)
+                x = x.tanh()
+                emb_list.append(x)
+        return emb_list
     
     
 class mySAGE(nn.Module):

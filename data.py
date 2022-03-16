@@ -18,6 +18,7 @@ from models import *
 import numpy as np
 import random
 import torch
+import matplotlib.pyplot as plt
 
 '''
 Please note that some function codes are apopted and revised from
@@ -518,6 +519,13 @@ def augment_attr_khop(Gs, Gt, attr_s, attr_t, interval, k):
     # node: khop nbr의 구성을 갖는 dict 생성
     khopdict_source = {key : len(nx.single_source_shortest_path_length(Gs, source = key, cutoff=k)) for key in Gs_nodes}
     khopdict_target = {key : len(nx.single_source_shortest_path_length(Gt, source = key, cutoff=k)) for key in Gt_nodes}
+    
+    
+
+    #plt.bar(khopdict_source.keys(), khopdict_source.values(), width = 1, color='g')
+    plt.bar(khopdict_target.keys(), khopdict_target.values(), width = 1, color='r')
+    plt.show()
+    
     # Gs, Gt 중 max deg를 측정
     max_deg = max(max(khopdict_source.values()), max(khopdict_target.values()))
     print(f"max k-hop degree is {max_deg}")
@@ -554,14 +562,63 @@ def augment_attr_Katz(Gs, Gt, attr_s, attr_t, interval):
     # attribute index의 순서는 G*.nodes()를 출력했을때 나오는 순서와 같음 !!
     
     # Katz dictionary
-    katzdict_s = nx.katz_centrality_numpy(Gs, beta = 1, normalized = False)
-    katzdict_t = nx.katz_centrality_numpy(Gt, beta = 1, normalized = False)
+    katzdict_s = nx.katz_centrality_numpy(Gs, alpha=0.05, beta = 1, normalized = False)
+    katzdict_t = nx.katz_centrality_numpy(Gt,alpha=0.05,  beta = 1, normalized = False)
+    
+ #   plt.bar(katzdict_s.keys(), katzdict_s.values(), width = 1, color='g')
+    plt.bar(katzdict_t.keys(), katzdict_t.values(), width = 1, color='r')
+    plt.show()
+    
+    
     # Gs, Gt 중 max length를 측정
     max_len = max( (max(katzdict_s.values())-min(katzdict_s.values())), (max(katzdict_t.values())-min(katzdict_t.values())))
     print(f"len of attr is {max_len}")
 
     # interval을 기준으로 했을 때, 늘어나는 속성 개수를 계산
     num_attr = math.ceil(max_len / interval)
+    # n_s * num_attr 의 속성 벡터를 0 value로 초기화
+    init_np_s = np.zeros((Gs.number_of_nodes(), num_attr))
+    init_np_t = np.zeros((Gt.number_of_nodes(), num_attr))
+
+    # 각 노드마다 deg를 측정하여 attr를 init_np에 assign
+    for idx_s, node_s in enumerate(Gs.nodes()):
+        katz_node = katzdict_s[node_s]
+        init_np_s[idx_s, int(katz_node / interval) - 1] = 1
+
+    for idx_t, node_t in enumerate(Gt.nodes()):
+        katz_node = katzdict_t[node_t]
+        init_np_t[idx_t, int(katz_node / interval) - 1] = 1
+
+    # assign이 완료된 매트릭스를 기존 attr에 attach (np.append(a,b, axis =1))
+    new_attr_s = np.append(attr_s, init_np_s, axis=1)
+    new_attr_t = np.append(attr_t, init_np_t, axis=1)
+    new_attr_s = init_np_s
+    new_attr_t = init_np_t
+    # 만약 len(attr_s) == 1 (plain network) 의 경우, 그냥 attr을 대체하면 된다.
+    if len(attr_s) == 1:
+        new_attr_s = new_attr_s[:, 1:]
+        new_attr_t = new_attr_t[:, 1:]
+
+    return new_attr_s, new_attr_t
+
+def augment_attr_Katz_v2(Gs, Gt, attr_s, attr_t, num_attr):
+    # attribute index의 순서는 G*.nodes()를 출력했을때 나오는 순서와 같음 !!
+    
+    # Katz dictionary
+    katzdict_s = nx.katz_centrality_numpy(Gs, alpha=0.05, beta = 1, normalized = False)
+    katzdict_t = nx.katz_centrality_numpy(Gt,alpha=0.05,  beta = 1, normalized = False)
+    
+    plt.bar(katzdict_s.keys(), katzdict_s.values(), width = 1, color='g')
+ #   plt.bar(katzdict_t.keys(), katzdict_t.values(), width = 1, color='r')
+    plt.show()
+    
+    
+    # Gs, Gt 중 max length를 측정
+    max_len = max( (max(katzdict_s.values())-min(katzdict_s.values())), (max(katzdict_t.values())-min(katzdict_t.values())))
+    print(f"len of attr is {max_len}")
+
+    # interval을 기준으로 했을 때, 늘어나는 속성 개수를 계산
+    interval = math.ceil(max_len / num_attr)
     # n_s * num_attr 의 속성 벡터를 0 value로 초기화
     init_np_s = np.zeros((Gs.number_of_nodes(), num_attr))
     init_np_t = np.zeros((Gt.number_of_nodes(), num_attr))

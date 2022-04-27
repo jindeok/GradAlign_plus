@@ -31,7 +31,7 @@ def na_dataloader(args):
         # for douban dataset
         G1, G2= loadG(args.data_folder, args.graphname)           
       
-        if args.graphname == 'am-td': # will be revised later 
+        if args.graphname == 'am-td': # will be combined soon
         
             source_dataset = Dataset('dataset\\DataProcessing\\allmv_tmdb\\allmv')
             target_dataset = Dataset('dataset\\DataProcessing\\allmv_tmdb\\tmdb')
@@ -45,7 +45,7 @@ def na_dataloader(args):
             
             return G1, G2, attr1, attr2, alignment_dict, alignment_dict_reversed, idx1_dict, idx2_dict
         
-        elif args.graphname == 'fl-my': # will be revised later 
+        elif args.graphname == 'fl-my': # will be combined soon
         
             source_dataset = Dataset('dataset\\DataProcessing\\fl-my\\flickr')
             target_dataset = Dataset('dataset\\DataProcessing\\fl-my\\myspace')
@@ -117,16 +117,17 @@ def PerturbedProcessing(G1, G2, com_portion, rand_portion, graphname):
     
 def AttributeProcessing(args,G1,G2, alignment_dict):
 
-    attribute_sim, attr1, attr2, attr1_pd, attr2_pd = read_attribute(args.attribute_folder, args.graphname, G1, G2, alignment_dict)
+    attribute_sim, attr1, attr2, attr1_pd, attr2_pd = \
+        read_attribute(args.attribute_folder, args.graphname, G1, G2, alignment_dict)
 
     featpd1 = pd.DataFrame(attr1)
     featpd2 = pd.DataFrame(attr2)
     featnpy1 = featpd1.to_numpy() 
     featnpy2 = featpd2.to_numpy() 
-    print(featpd1)
-    np.save("feats1.npy",featnpy1)
-    np.save("feats2.npy",featnpy2)
-    print("feats exporting complete")
+    # print(featpd1)
+    # np.save("feats1.npy",featnpy1)
+    # np.save("feats2.npy",featnpy2)
+    # print("feats exporting complete")
     
     return attr1, attr2, attribute_sim
 

@@ -18,6 +18,8 @@ from models import *
 import numpy as np
 import random
 import torch
+from functools import reduce
+
 
 '''
 Please note that some function codes are apopted and revised from
@@ -133,13 +135,7 @@ def AttributeProcessing(args,G1,G2, alignment_dict):
 
 
 
-def DeleteDuplicatedElement(gt_dict):
-    #for am-td
-    dellist = [1759,1702,3208,3255,1311,2126,4249,2892,4657,5738,4990,2076]
-    #[1786,1725,3231,3275,1349,2148,5641,2915,4661,5605,4991,2077]
-    for key in dellist:
-        del gt_dict[key]
-    return gt_dict
+
 
 ''' perturbation '''
 def perturb_edge_pair(G, rand_portion = 0.1):
@@ -510,9 +506,9 @@ def create_idx_dict_pair_backup(G1,G2,alignment_dict):
     idx2_dict = {c : d for d, c in zip(idx2_list,G2list)}
     
     return idx1_dict, idx2_dict
-def augment_attr(Gs, Gt, attr_s, attr_t, interval):
-    # attribute index의 순서는 G*.nodes()를 출력했을때 나오는 순서와 같음 !!
 
+def augment_attr(Gs, Gt, attr_s, attr_t, interval):
+    
     # Gs, Gt 중 max deg를 측정
     max_deg = max(max(Gs.degree, key=lambda x: x[1])[1], max(Gt.degree, key=lambda x: x[1])[1])
     print(f"max degree is {max_deg}")
@@ -589,46 +585,106 @@ def aug_trimming(aug_s, aug_t):
     aug_t_trimmed = concat_aug[len(aug_s):]
     return aug_s_trimmed, aug_t_trimmed
 
-def augment_attributes(Gs, Gt, attr_s, attr_t, num_attr, version = "Katz", khop = 1): 
+def augment_attributes(Gs, Gt, attr_s, attr_t, num_attr, version = "katz", khop = 1, penalty = 0.1, normalize = True): 
     Gs_nodes = list(Gs.nodes())
     Gt_nodes = list(Gt.nodes())
     print(f"This is {version} binning version ")
-    if version == "Katz":   
+    if version == "katz":   
         attdict_s = nx.katz_centrality_numpy(Gs,
-                                              alpha=0.05,
+                                              alpha = 0.01,
                                               beta = 1, 
                                               normalized = False)
         attdict_t = nx.katz_centrality_numpy(Gt,
-                                              alpha=0.05,
+                                              alpha = 0.01,
                                               beta = 1,
                                               normalized = False)
         
+    elif version == "eigenvector":
+
+        attdict_s = nx.eigenvector_centrality(Gs, max_iter = 500, tol = 1e-8)
+        attdict_t = nx.eigenvector_centrality(Gt, max_iter = 500, tol = 1e-8)
+    
+    elif version == "pagerank":
+        attdict_s = nx.pagerank(Gs,
+                                alpha = 0.85,
+                                max_iter = 100)
+        attdict_t = nx.pagerank(Gt,
+                                alpha = 0.85,
+                                max_iter = 100)
+    
+    elif version == "betweenness":
+        attdict_s = nx.betweenness_centrality(Gs)
+        attdict_t = nx.betweenness_centrality(Gt)
+    
+    elif version == "closeness":
+        attdict_s = nx.closeness_centrality(Gs)
+        attdict_t = nx.closeness_centrality(Gt)
+
+        
     elif version == "khop":
+        
         attdict_s = {key : len(nx.single_source_shortest_path_length
-                                (Gs, source = key, cutoff=khop))
-                      for key in Gs_nodes}
+                            (Gs, source = key, cutoff=1))                     
+                     for key in Gs_nodes}
         attdict_t = {key : len(nx.single_source_shortest_path_length
-                               (Gt, source = key, cutoff=khop))
+                               (Gt, source = key, cutoff=1))
                      for key in Gt_nodes}
-    
+
+        attdict_s_2hop = {key : penalty * len(nx.single_source_shortest_path_length
+                            (Gs, source = key, cutoff=2))
+                     for key in Gs_nodes}        
+        attdict_t_2hop = {key : penalty * len(nx.single_source_shortest_path_length
+                               (Gt, source = key, cutoff=2))
+                     for key in Gt_nodes}
+        dict_seq_2_s = [attdict_s, attdict_s_2hop]
+        dict_seq_2_t = [attdict_t, attdict_t_2hop]        
+        attdict_s_2hop = reduce(lambda d1,d2: {k: d1.get(k,0)+d2.get(k,0) for k in set(d1)|set(d2)}, dict_seq_2_s)
+        attdict_t_2hop = reduce(lambda d1,d2: {k: d1.get(k,0)+d2.get(k,0) for k in set(d1)|set(d2)}, dict_seq_2_t)
+                
+        attdict_s_3hop = {key : penalty**2 * len(nx.single_source_shortest_path_length
+                            (Gs, source = key, cutoff=3))
+                  for key in Gs_nodes}
+        attdict_t_3hop = {key : penalty**2 * len(nx.single_source_shortest_path_length
+                               (Gt, source = key, cutoff=3))
+                     for key in Gt_nodes}
+        dict_seq_3_s = [attdict_s_2hop, attdict_s_3hop]
+        dict_seq_3_t = [attdict_t_2hop, attdict_t_3hop]        
+        attdict_s_3hop = reduce(lambda d1,d2: {k: d1.get(k,0)+d2.get(k,0) for k in set(d1)|set(d2)}, dict_seq_3_s)
+        attdict_t_3hop = reduce(lambda d1,d2: {k: d1.get(k,0)+d2.get(k,0) for k in set(d1)|set(d2)}, dict_seq_3_t)
+        
+        if khop == 2:
+            attdict_s = attdict_s_2hop
+            attdict_t = attdict_t_2hop
+            
+        elif khop == 3:
+            attdict_s = attdict_s_3hop
+            attdict_t = attdict_t_3hop
+        
+        elif khop >= 4:
+            print("khop should be set in range [1,3]")
+            
+
     # Consistent normalize
-    attdict_s = {key: value / max(attdict_s.values())
-                 for key, value in attdict_s.items()}
-    attdict_t = {key: value / max(attdict_t.values())
-                 for key, value in attdict_t.items()}    
-    
-    interval = 1 / num_attr
+    if normalize == True:        
+        attdict_s = {key: (value - min(attdict_s.values())) / (max(attdict_s.values())-min(attdict_s.values()))
+                     for key, value in attdict_s.items()}
+        attdict_t = {key: (value - min(attdict_t.values())) / (max(attdict_t.values())-min(attdict_t.values()))
+                     for key, value in attdict_t.items()}        
+        interval = 1 / num_attr
+        
+    elif normalize == False:
+        interval = max(max(attdict_s.values()),max(attdict_t.values())) / num_attr
 
     init_np_s = np.zeros((Gs.number_of_nodes(), num_attr))
     init_np_t = np.zeros((Gt.number_of_nodes(), num_attr))
 
     for idx_s, node_s in enumerate(Gs.nodes()):        # assign binning
-        katz_node = attdict_s[node_s]
-        init_np_s[idx_s, int(katz_node / interval) - 1] = 1
+        cent_node = attdict_s[node_s]
+        init_np_s[idx_s, int(cent_node / interval) - 1] = 1
 
     for idx_t, node_t in enumerate(Gt.nodes()):
-        katz_node = attdict_t[node_t]
-        init_np_t[idx_t, int(katz_node / interval) - 1] = 1
+        cent_node = attdict_t[node_t]
+        init_np_t[idx_t, int(cent_node / interval) - 1] = 1
 
     new_attr_s = np.append(attr_s, init_np_s, axis = 1)
     new_attr_t = np.append(attr_t, init_np_t, axis = 1)
@@ -698,4 +754,12 @@ def att_consist_checker(G1, G2, attr1, attr2, idx1_dict, idx2_dict, alignment_di
 
 def feat_diff_checker(attr1, attr2):
     print(f"Norm of the vector diff avg is : {np.linalg.norm(np.mean(attr1 - attr2, axis = 0)):.4f}")   
+    
+def DeleteDuplicatedElement(gt_dict):
+    #for am-td
+    dellist = [1759,1702,3208,3255,1311,2126,4249,2892,4657,5738,4990,2076]
+    #[1786,1725,3231,3275,1349,2148,5641,2915,4661,5605,4991,2077]
+    for key in dellist:
+        del gt_dict[key]
+    return gt_dict    
     

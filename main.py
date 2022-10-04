@@ -37,18 +37,23 @@ def parse_args():
     parser.add_argument('--data_folder', nargs='?', default='dataset/graph/')
     parser.add_argument('--alignment_folder', nargs='?', default='dataset/alignment/',
                          help="Make sure the alignment numbering start from 0")
-    parser.add_argument('--k_hop', nargs='?', default= 2)  
-    parser.add_argument('--hid_dim', nargs='?', default=150) 
-    parser.add_argument('--train_ratio', nargs='?', default= 0.05) 
-    parser.add_argument('--graphname', nargs='?', default='fb-tt') 
+    parser.add_argument('--k_hop', nargs='?', default= 3)  
+    parser.add_argument('--hid_dim', nargs='?', default=100) 
+    parser.add_argument('--train_ratio', nargs='?', default= 0.0) 
+    parser.add_argument('--graphname', nargs='?', default='fb-tt', 
+    help = "eigenvector, pagerank, betweenness, closeness, khop, katz") 
+    parser.add_argument('--centrality', nargs='?', default='eigenvector') 
     parser.add_argument('--mode', nargs='?', default='not_perturbed', help="not_perturbed or perturbed") 
-    parser.add_argument('--edge_portion', nargs='?', default=0.2,  help="a param for the perturbation case")  
-    parser.add_argument('--att_portion', nargs='?', default=0.1,  help="a param for the perturbation case")
+    parser.add_argument('--edge_portion', nargs='?', default=0.05,  help="a param for the perturbation case")  
+    parser.add_argument('--att_portion', nargs='?', default=0,  help="a param for the perturbation case")
     
     return parser.parse_args()
 
 args = parse_args()
 
+
+with open("./result.txt", "a") as file:
+    file.write(f"---- dataset:{args.graphname} centrality:{args.centrality}\n")
 
 ''' ------------------------ Run Grad-Align -----------------------------  '''
 
@@ -60,7 +65,7 @@ if __name__ == "__main__":
     attr1_aug, attr2_aug = augment_attributes(G1, G2,
                                               attr1, attr2,
                                               num_attr = 15,
-                                              version = "Katz",     # "Katz" or "khop"
+                                              version = args.centrality,     
                                               khop = 1,
                                               normalize = False) 
     attr1_aug, attr2_aug = aug_trimming(attr1_aug, attr2_aug)
@@ -80,3 +85,7 @@ if __name__ == "__main__":
 
 
 
+# ss = nx.betweenness_centrality(G2)
+# ss = [a for a in ss.values()]
+# ss = pd.DataFrame(ss)
+# ss.hist()

@@ -16,6 +16,7 @@ from networkx.readwrite import json_graph
 import graph_utils
 import math
 from data import *
+import scipy
 
 '''methods for main alg'''
 
@@ -70,29 +71,49 @@ def clip(x):
         return 0
     else:
         return x
-    
-    
-    
-def calculate_Tversky_fortest(setA, setB, alpha, beta):
 
-    setA = set(setA)
-    setB = set(setB)   
-    ep = 0.01
+
+def centrality_choicer(Gs, Gt, bins, alpha) -> str:
+    print("------- Calculating centralities ... ------ \n")
+    centralities = ['degree', 'betweenness', 'closeness', 'eigenvector', 'katz', 'pagerank']
+    cents_s = [dict(nx.degree(Gs)),
+               nx.betweenness_centrality(Gs), 
+               nx.closeness_centrality(Gs),
+               nx.eigenvector_centrality(Gs, max_iter = 500, tol = 1e-8),
+               nx.katz_centrality(Gs, alpha = 0.01, normalized = False),
+               nx.pagerank(Gs,alpha = 0.85, max_iter = 100)]
+    cents_t = [dict(nx.degree(Gt)),
+               nx.betweenness_centrality(Gt), 
+               nx.closeness_centrality(Gt),
+               nx.eigenvector_centrality(Gt, max_iter = 500, tol = 1e-8),
+               nx.katz_centrality(Gt, alpha = 0.01, normalized = False),
+               nx.pagerank(Gt,alpha = 0.85, max_iter = 100)]
+    
+    print("------- Calculating our measure ... ------ \n")
+    results = []
+    for cent_s, cent_t in zip(cents_s, cents_t):        
+        cs = [_ for _ in cent_s.values()]
+        ct = [_ for _ in cent_t.values()]
+        max_range = max(max(cs), max(ct))
+        min_range = min(min(cs), min(ct))
+        hs, _ = np.histogram(cs, bins, range = (min_range, max_range), density = False)
+        ht, _ = np.histogram(ct, bins, range = (min_range, max_range), density = False)  
+        pdf_s = hs / np.sum(hs)
+        pdf_t = ht / np.sum(ht) 
+        results.append(our_measure(pdf_s, pdf_t, alpha))
+    results_np = np.array(results)
+    
+    return centralities[np.argmax(results_np)]
         
-    inter = len(setA & setB) + ep
-    diffA = len(setA - setB) 
-    diffB = len(setB - setA)
-     
-    Tver = inter / (inter + alpha*diffA + beta*diffB)
+
+def our_measure(pdf_s, pdf_t, alpha):    
+    kl = sum(scipy.special.kl_div(pdf_s, pdf_t))
+    var = np.var(pdf_s)+np.var(pdf_t)
     
-    bool = (inter<diffB)
-    #print(f"ACNs:{inter},diffB:{diffB}")
+    return kl + alpha * var
     
-    return Tver,bool
-
-
-
-
+    
+ 
 
 ''' preproc '''
 

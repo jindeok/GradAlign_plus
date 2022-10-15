@@ -79,13 +79,3 @@ if __name__ == "__main__":
                                       args.train_ratio, idx1_dict, idx2_dict, alpha = G2.number_of_nodes() / G1.number_of_nodes(), beta = 1)    
     GradAlign.run_algorithm()
 
-
-
-
-
-
-
-# ss = nx.betweenness_centrality(G2)
-# ss = [a for a in ss.values()]
-# ss = pd.DataFrame(ss)
-# ss.hist()

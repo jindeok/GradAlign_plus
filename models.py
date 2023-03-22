@@ -51,7 +51,7 @@ class GradAlign:
         self.att_aug_s = att_aug_s
         self.att_aug_t = att_aug_t
 
-        self.epochs = 30  # 30
+        self.epochs = 10  # 30
         self.hid_channel = hid
 
         self.default_weight = 1.0
@@ -184,7 +184,9 @@ class GradAlign:
             h_norm += np.linalg.norm(h_s[self.idx1_dict[k]] -
                                      h_t[self.idx2_dict[v]], axis=0)
         print(f"x_norm diff: {x_norm / M}\nh_nrom diff: {h_norm / M}")
-
+        with open("./result.txt", "a") as file:
+            file.write(f"\n x_norm diff: {x_norm / M}\n h_nrom diff: {h_norm / M}")
+	
     def convert2torch_data(self, G, att):
 
         data = from_networkx(G)
@@ -274,30 +276,33 @@ class GradAlign:
                                                             self.idx2_dict[columns[j]]]
 
         if len(seed_list1) != 0:
-            print("Tversky sim calculation..")
-            sim_matrix2 = calculate_Tversky_coefficient(
+            print("ACN sim calculation..")
+            sim_matrix2 = ACN_sim(
                 self.G1, self.G2, seed_list1, seed_list2, index, columns, alpha=self.alpha, beta=self.beta)
             sim_matrix[:, 2] *= sim_matrix2[:, 2]
         else:
             sim_matrix2 = 1  # no effect
         sim_matrix = sim_matrix[np.argsort(-sim_matrix[:, 2])]
 
-        seed1 = []
-        seed2 = []
+        seed1, seed2 = [], []
         len_sim_matrix = len(sim_matrix)
         if len_sim_matrix != 0:
-
-            len_sim_matrix = len(sim_matrix)
-            T = align_func(version='const', a=int(
-                len(self.alignment_dict)/self.iter), b=0, i=iteration)
-
-            while len(sim_matrix) > 0 and T > 0:
+            T = align_func(version='const', a=int(len(self.alignment_dict) / self.iter), b=0, i=iteration)
+            nodes1, nodes2, sims = sim_matrix[:, 0].astype(int), sim_matrix[:, 1].astype(int), sim_matrix[:, 2]
+            idx = np.argsort(-sims)
+            nodes1, nodes2, sims = nodes1[idx], nodes2[idx], sims[idx]
+            while len(nodes1) > 0 and T > 0:
                 T -= 1
-                node1, node2 = int(sim_matrix[0, 0]), int(sim_matrix[0, 1])
+                node1, node2 = nodes1[0], nodes2[0]
                 seed1.append(node1)
                 seed2.append(node2)
-                sim_matrix = sim_matrix[sim_matrix[:, 0] != node1, :]
-                sim_matrix = sim_matrix[sim_matrix[:, 1] != node2, :]
+                mask = np.logical_and(nodes1 != node1, nodes2 != node2)
+                nodes1, nodes2, sims = nodes1[mask], nodes2[mask], sims[mask]
+            sim_matrix = np.column_stack((nodes1, nodes2, sims))
+        anchor = len(seed_list1)
+        seed_list1 += seed1
+        seed_list2 += seed2
+        print('Add seed nodes : {}'.format(len(seed1)))
 
         seed_list1 += seed1
         seed_list2 += seed2
@@ -348,30 +353,29 @@ class GradAlign:
                                                             self.idx2_dict[columns[j]]]
         if len(seed_list1) != 0:
             print("Tversky sim calculation..")
-            sim_matrix2 = calculate_Tversky_coefficient(
+            sim_matrix2 = ACN_sim(
                 self.G1, self.G2, seed_list1, seed_list2, index, columns, alpha=self.alpha, beta=self.beta)
             sim_matrix[:, 2] *= sim_matrix2[:, 2]
         else:
             sim_matrix2 = 1  # no effect
         sim_matrix = sim_matrix[np.argsort(-sim_matrix[:, 2])]
 
-        seed1 = []
-        seed2 = []
+        seed1, seed2 = [], []
         len_sim_matrix = len(sim_matrix)
         if len_sim_matrix != 0:
-
-            len_sim_matrix = len(sim_matrix)
-            T = align_func(version='const', a=int(
-                len(self.alignment_dict)/5), b=0, i=iteration)
-
-            while len(sim_matrix) > 0 and T > 0:
+            T = align_func(version='const', a=int(len(self.alignment_dict) / self.iter), b=0, i=iteration)
+            nodes1, nodes2, sims = sim_matrix[:, 0].astype(int), sim_matrix[:, 1].astype(int), sim_matrix[:, 2]
+            idx = np.argsort(-sims)
+            nodes1, nodes2, sims = nodes1[idx], nodes2[idx], sims[idx]
+            while len(nodes1) > 0 and T > 0:
                 T -= 1
-                node1, node2 = int(sim_matrix[0, 0]), int(sim_matrix[0, 1])
+                node1, node2 = nodes1[0], nodes2[0]
                 seed1.append(node1)
                 seed2.append(node2)
-                sim_matrix = sim_matrix[sim_matrix[:, 0] != node1, :]
-                sim_matrix = sim_matrix[sim_matrix[:, 1] != node2, :]
-
+                mask = np.logical_and(nodes1 != node1, nodes2 != node2)
+                nodes1, nodes2, sims = nodes1[mask], nodes2[mask], sims[mask]
+            sim_matrix = np.column_stack((nodes1, nodes2, sims))
+        anchor = len(seed_list1)
         seed_list1 += seed1
         seed_list2 += seed2
         print('Add seed nodes : {}'.format(len(seed1)))
@@ -443,6 +447,12 @@ class GradAlign:
             ',  @10:' + str(round(top10_eval, 4)) + \
             ',  Acc:' + str(round(acc, 4))
 
+        with open("./result.txt", "a") as file:
+            file.write('\n All accuracy : %.2f%%' %
+              (100*(count / len(self.alignment_dict))))
+            file.write('\n Success@1 : {:.4f}'.format(top1_eval))
+            file.write('\n Success@5 : {:.4f}'.format(top5_eval))
+            file.write('\n Success@10 : {:.4f}'.format(top10_eval))
         return S, result
 
     def adj2S(self, adj, m, n):
@@ -682,7 +692,7 @@ def align_func(version, a, b, i):
         return a
 
 
-def calculate_Tversky_coefficient(G1, G2, seed_list1, seed_list2, index, columns, alpha, beta, alignment_dict=None):
+def ACN_sim(G1, G2, seed_list1, seed_list2, index, columns, alpha, beta, alignment_dict=None):
 
     start = time.time()
 

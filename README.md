@@ -1,6 +1,6 @@
 # Grad-Align+
 Source code for the papers
-- Jin-Duk et al. "Grad-Align+: Empowering Gradual Network Alignment Using Attribute Augmentation" CIKM-22 (to appear)
+- Jin-Duk et al. "Grad-Align+: Empowering Gradual Network Alignment Using Attribute Augmentation" CIKM-22 
 
 
 Pytorch_geometric (https://pytorch-geometric.readthedocs.io/en/latest/) package is used for the implementation of graph neural networks (GNNs).

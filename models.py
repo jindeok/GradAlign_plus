@@ -44,7 +44,7 @@ class GradAlign:
 
         #balancing
         self.lam = 0.3
-        self.iter = 1
+        self.iter = 10
 
         self.att_s = att_s
         self.att_t = att_t
